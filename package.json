@@ -1,0 +1,29 @@
+{
+  "name": "cashu-mint-discovery",
+  "version": "1.0.0",
+  "description": "A portable JavaScript library for discovering Cashu mints via Nostr",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "cashu",
+    "nostr",
+    "mint",
+    "discovery",
+    "ecash"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "nostr-tools": "^2.10.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jooray/mint-discovery.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jooray/mint-discovery/issues"
+  },
+  "homepage": "https://github.com/jooray/mint-discovery#readme"
+}
