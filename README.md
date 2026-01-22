@@ -92,7 +92,7 @@ Create a new discovery instance.
 
 #### `discover(options)`
 
-Fetch all mints and reviews from Nostr, then fetch HTTP info.
+Fetch all mints and reviews from Nostr, then fetch HTTP info. This method waits for all Nostr events before returning.
 
 ```javascript
 const mints = await discovery.discover({
@@ -100,6 +100,37 @@ const mints = await discovery.discover({
   onProgress: ({ phase, step, url }) => console.log(phase, step)
 });
 ```
+
+Returns: `Promise<MintRecommendation[]>`
+
+#### `discoverStreaming(callbacks)`
+
+Discover mints with streaming updates as events arrive from Nostr. Unlike `discover()`, this emits mints progressively via callbacks, providing a better user experience as mints appear within 1-2 seconds instead of waiting for all data.
+
+```javascript
+const mints = await discovery.discoverStreaming({
+  onMint: (mint) => {
+    // Called for each new mint or when a mint's data is updated
+    console.log('Mint:', mint.url, mint.reviewsCount, 'reviews');
+    updateUI(mint);
+  },
+  onProgress: ({ phase, step }) => {
+    // Progress phases: 'nostr' (step: 'subscribing', 'mint-info-complete', 'reviews-complete')
+    //                  'http' (step: 'fetching', 'fetched')
+    //                  'done'
+    console.log('Progress:', phase, step);
+  },
+  onComplete: (allMints) => {
+    // Called when initial discovery is complete
+    console.log('Complete:', allMints.length, 'mints');
+  }
+});
+```
+
+**Callbacks:**
+- `onMint(recommendation)`: Called whenever a mint is discovered or updated (new review, HTTP info fetched)
+- `onProgress({ phase, step, url?, error? })`: Progress updates during discovery
+- `onComplete(recommendations)`: Called when discovery finishes with sorted final results
 
 Returns: `Promise<MintRecommendation[]>`
 

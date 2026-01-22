@@ -170,6 +170,165 @@ function create(options = {}) {
   }
 
   /**
+   * Discover mints with streaming updates as events arrive from Nostr.
+   * Unlike discover(), this emits mints progressively via callbacks.
+   *
+   * @param {Object} [callbacks] - Event callbacks
+   * @param {Function} [callbacks.onMint] - Called with updated recommendation for each new mint/review
+   * @param {Function} [callbacks.onProgress] - Progress callback
+   * @param {Function} [callbacks.onComplete] - Called when initial discovery is complete
+   * @returns {Promise<Object[]>} Final sorted array of MintRecommendation
+   */
+  async function discoverStreaming(callbacks = {}) {
+    if (isDiscovering) {
+      return aggregator.getRecommendations();
+    }
+
+    isDiscovering = true;
+
+    try {
+      // Load from storage first
+      await loadFromStorage();
+
+      // Track EOSE from both subscriptions
+      let mintInfoEose = false;
+      let reviewsEose = false;
+      let httpFetchStarted = false;
+
+      const checkEoseAndFetchHttp = async () => {
+        if (mintInfoEose && reviewsEose && !httpFetchStarted) {
+          httpFetchStarted = true;
+
+          if (callbacks.onProgress) {
+            callbacks.onProgress({ phase: "http", step: "fetching" });
+          }
+
+          // Fetch HTTP info for all discovered mints
+          const urls = aggregator.getAllUrls();
+          const staleUrls = [];
+
+          for (const url of urls) {
+            const existing = aggregator.getRecommendation(url);
+            if (!existing || !isCacheFresh(existing, config.cacheMaxAge)) {
+              staleUrls.push(url);
+            }
+          }
+
+          if (staleUrls.length > 0) {
+            await fetchMintInfoBatch(staleUrls, {
+              concurrency: config.httpConcurrency,
+              delayMs: config.httpDelayMs,
+              timeout: config.httpTimeout,
+              onResult: async (result) => {
+                aggregator.setHttpInfo(result.url, result);
+
+                // Save to storage
+                if (storage) {
+                  try {
+                    await storage.saveHttpInfo(result.url, result);
+                  } catch {}
+                }
+
+                // Emit updated recommendation
+                if (callbacks.onMint) {
+                  const rec = aggregator.getRecommendation(result.url);
+                  if (rec) callbacks.onMint(rec);
+                }
+
+                if (callbacks.onProgress) {
+                  callbacks.onProgress({
+                    phase: "http",
+                    step: "fetched",
+                    url: result.url,
+                    error: result.error,
+                  });
+                }
+              },
+            });
+          }
+
+          // Close subscriptions
+          mintInfoSub.close();
+          reviewSub.close();
+
+          if (callbacks.onProgress) {
+            callbacks.onProgress({ phase: "done" });
+          }
+
+          if (callbacks.onComplete) {
+            callbacks.onComplete(aggregator.getRecommendations());
+          }
+
+          isDiscovering = false;
+        }
+      };
+
+      if (callbacks.onProgress) {
+        callbacks.onProgress({ phase: "nostr", step: "subscribing" });
+      }
+
+      // Subscribe to mint info events
+      const mintInfoSub = nostrClient.subscribeMintInfo({
+        onEvent: (mintInfo) => {
+          aggregator.addMintInfo(mintInfo);
+
+          // Emit recommendation for this mint
+          if (callbacks.onMint) {
+            const rec = aggregator.getRecommendation(mintInfo.url);
+            if (rec) callbacks.onMint(rec);
+          }
+        },
+        onEose: () => {
+          mintInfoEose = true;
+          if (callbacks.onProgress) {
+            callbacks.onProgress({ phase: "nostr", step: "mint-info-complete" });
+          }
+          checkEoseAndFetchHttp();
+        },
+      });
+
+      // Subscribe to review events
+      const reviewSub = nostrClient.subscribeReviews({
+        onEvent: async (review) => {
+          aggregator.addReview(review);
+
+          // Save to storage
+          if (storage) {
+            try {
+              await storage.saveReview(review);
+            } catch {}
+          }
+
+          // Emit recommendation for this mint
+          if (callbacks.onMint) {
+            const rec = aggregator.getRecommendation(review.url);
+            if (rec) callbacks.onMint(rec);
+          }
+        },
+        onEose: () => {
+          reviewsEose = true;
+          if (callbacks.onProgress) {
+            callbacks.onProgress({ phase: "nostr", step: "reviews-complete" });
+          }
+          checkEoseAndFetchHttp();
+        },
+      });
+
+      // Return a promise that resolves when discovery is complete
+      return new Promise((resolve) => {
+        const originalOnComplete = callbacks.onComplete;
+        callbacks.onComplete = (recommendations) => {
+          if (originalOnComplete) originalOnComplete(recommendations);
+          resolve(recommendations);
+        };
+      });
+    } catch (err) {
+      isDiscovering = false;
+      throw err;
+    }
+  }
+
+  /**
    * Subscribe to live updates from Nostr.
    *
    * @param {Object} callbacks - Event callbacks
@@ -349,6 +508,7 @@ function create(options = {}) {
 
   return {
     discover,
+    discoverStreaming,
     subscribe,
     getRecommendations,
     getReviewsForMint,
