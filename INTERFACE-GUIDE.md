@@ -2,6 +2,26 @@
 
 This document describes the recommended user interface for displaying Cashu mint discovery results.
 
+## Important Warning
+
+**All implementations MUST display the following warning and require user acknowledgment before allowing mint selection:**
+
+> Audit data is provided by independent third parties to help assess a mint's reliability over time. However, these results are informational only and do not guarantee the safety, solvency, or trustworthiness of any mint. Always conduct your own research and ensure you trust the mint operator before using their services. To be sure, run your own mint, this is the Bitcoin way!
+
+### Implementation Requirements
+
+1. Display this warning prominently in the mint discovery interface
+2. Include a checkbox: "I understand the above"
+3. Disable all "Select" / "Connect" buttons until the checkbox is checked
+4. Reset the checkbox state each time the discovery modal is opened
+
+This disclaimer is essential because:
+- Mint reviews are subjective and can be manipulated
+- Audit data reflects past behavior, not future guarantees
+- Users must take personal responsibility for their choice of mint
+
+---
+
 ## Overview
 
 The mint discovery interface should help users:
