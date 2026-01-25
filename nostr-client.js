@@ -119,7 +119,7 @@ function createNostrClient(options = {}) {
    */
   function subscribeMintInfo(callbacks) {
     const filter = { kinds: [MINT_INFO_KIND] };
-    const sub = pool.subscribeMany(relays, [filter], {
+    const sub = pool.subscribeMany(relays, filter, {
       onevent(event) {
         const parsed = parseMintInfoEvent(event);
         if (parsed && callbacks.onEvent) {
@@ -143,7 +143,7 @@ function createNostrClient(options = {}) {
    */
   function subscribeReviews(callbacks) {
     const filter = { kinds: [REVIEW_KIND], "#k": ["38172"] };
-    const sub = pool.subscribeMany(relays, [filter], {
+    const sub = pool.subscribeMany(relays, filter, {
       onevent(event) {
         const parsed = parseReviewEvent(event);
         if (parsed.length > 0 && callbacks.onEvent) {
