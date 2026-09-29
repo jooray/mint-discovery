@@ -2,6 +2,21 @@
 
 A portable JavaScript library for discovering Cashu mints via Nostr. Extracted from [cashu.me](https://cashu.me) for use in other projects.
 
+<!-- jooray-links:start -->
+### More from me
+
+**Related projects**
+
+- [cashupayserver](https://github.com/jooray/cashupayserver): BTCPay-compatible Lightning payments through Cashu, on ordinary PHP hosting
+- [cashu-wallet-php](https://github.com/jooray/cashu-wallet-php): a Cashu wallet library in PHP
+- [donation-sink](https://github.com/jooray/donation-sink): accept donations as Cashu tokens
+- [btcpay-greenfield-test](https://github.com/jooray/btcpay-greenfield-test): a minimal page for testing BTCPay Greenfield API integrations
+
+**Full project showcase:** Part of [CashuPayServer](https://juraj.bednar.io/showcase/#PAY-01) in my project showcase, or [all my projects](https://juraj.bednar.io/showcase/).
+
+I write about building things on [my blog](https://juraj.bednar.io/en/blog-en/). I also wrote a cypherpunk novel, [Tamers of Entropy](https://tamersofentropy.net/), and there is a [trailer](https://tamersofentropy.net/#trailer).
+<!-- jooray-links:end -->
+
 ## Features
 
 - Fetches mint info events (kind 38172) from Nostr relays
