@@ -25,7 +25,10 @@ function parseRatingAndComment(content) {
     return { rating: null, comment: "" };
   }
 
-  const match = content.match(/\s*\[(\d)\s*\/\s*5\]\s*(.*)$/s);
+  // NIP-87 does not define a rating format; clients (cashu.me, bitcoinmints) put
+  // "[X/5]" at the very start. Anchor it so "used to be [5/5], now a scam" is a
+  // comment, not a 5-star rating.
+  const match = content.match(/^\s*\[([1-5])\s*\/\s*5\]\s*(.*)$/s);
 
   if (!match) {
     return { rating: null, comment: content.trim() };

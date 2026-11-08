@@ -136,14 +136,21 @@ async function fetchMintInfoBatch(urls, options = {}) {
 /**
  * Check if a cached result is still fresh.
  *
- * @param {Object} cachedResult - Previously fetched result
+ * @param {Object} cachedResult - Previously fetched result or a recommendation
  * @param {number} [maxAgeSeconds=3600] - Maximum age in seconds (default: 1 hour)
  * @returns {boolean} True if the cache is still fresh
  */
 function isCacheFresh(cachedResult, maxAgeSeconds = 3600) {
-  if (!cachedResult || !cachedResult.fetchedAt) return false;
+  if (!cachedResult) return false;
+  // Accepts a fetchMintInfo result ({fetchedAt}) or a recommendation
+  // ({lastHttpInfoFetchAt}).
+  const fetchedAt = cachedResult.fetchedAt || cachedResult.lastHttpInfoFetchAt;
+  if (!fetchedAt) return false;
+  // A failed fetch is never fresh: retry it instead of showing a mint that was
+  // briefly unreachable as offline for the whole cache period.
+  if (cachedResult.error) return false;
   const nowSec = Math.floor(Date.now() / 1000);
-  return nowSec - cachedResult.fetchedAt < maxAgeSeconds;
+  return nowSec - fetchedAt < maxAgeSeconds;
 }
 
 module.exports = {

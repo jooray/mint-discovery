@@ -95,8 +95,14 @@ Each mint card should display:
 ### Sorting (Default)
 
 Mints are pre-sorted by the library:
-1. **Primary**: Review count (descending) - most reviewed first
-2. **Secondary**: Average rating (descending) - highest rated first
+1. **Reachable** mints first (`error === false`)
+2. **Score** (descending): the average rating with two imaginary 3-star reviews mixed in
+   (`(2*3 + sum of ratings) / (2 + number of ratings)`), so thirty 1-star reviews never
+   outrank a handful of 5-star ones and a single review cannot jump the queue
+3. **Number of ratings** (descending), then URL
+
+If you build your own list from streaming `onMint` updates, sort it with
+`MintDiscovery.compareRecommendations` to get the same order.
 
 ### Optional Filters
 

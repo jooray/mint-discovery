@@ -16,12 +16,63 @@
 /**
  * @typedef {Object} MintRecommendation
  * @property {string} url - Mint URL
- * @property {number} reviewsCount - Number of reviews
+ * @property {number} reviewsCount - Number of reviews (latest per author, rated or not)
+ * @property {number} ratingsCount - Number of those reviews that carry a 1-5 rating
  * @property {number|null} averageRating - Average rating or null
+ * @property {number} score - Ranking score (see rankingScore)
  * @property {Object} [info] - HTTP /v1/info response
  * @property {boolean} error - Whether last HTTP fetch failed
  * @property {number} [lastHttpInfoFetchAt] - Unix timestamp of last fetch
  */
+
+// Ranking: every mint starts with PRIOR_WEIGHT imaginary reviews of PRIOR_RATING
+// stars, and its real ratings are averaged in on top. A mint with one 5-star review
+// scores (2*3 + 5) / 3 = 3.67, one with twenty 5-star reviews scores 4.9, and one with
+// thirty 1-star reviews scores 1.1, so many bad reviews never outrank good ones and a
+// single review cannot jump the queue. Unrated mints sit at the neutral 3.0.
+const PRIOR_RATING = 3;
+const PRIOR_WEIGHT = 2;
+
+/**
+ * Normalize a mint URL so "https://m.example" and "https://m.example/" are one mint.
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+function normalizeUrl(url) {
+  if (typeof url !== "string") return url;
+  return url.trim().replace(/\/+$/, "");
+}
+
+/**
+ * Ranking score: average rating pulled towards PRIOR_RATING by PRIOR_WEIGHT
+ * imaginary reviews (a Bayesian average).
+ *
+ * @param {number[]} ratings - Valid 1-5 ratings
+ * @returns {number}
+ */
+function rankingScore(ratings) {
+  const sum = ratings.reduce((a, b) => a + b, 0);
+  return (PRIOR_RATING * PRIOR_WEIGHT + sum) / (PRIOR_WEIGHT + ratings.length);
+}
+
+/**
+ * Sort order for recommendations: reachable mints first, then by score, then by
+ * number of ratings, then URL (stable across runs).
+ *
+ * @param {MintRecommendation} a
+ * @param {MintRecommendation} b
+ * @returns {number}
+ */
+function compareRecommendations(a, b) {
+  const errDiff = (a.error ? 1 : 0) - (b.error ? 1 : 0);
+  if (errDiff !== 0) return errDiff;
+  const scoreDiff = (b.score ?? PRIOR_RATING) - (a.score ?? PRIOR_RATING);
+  if (Math.abs(scoreDiff) > 1e-9) return scoreDiff;
+  const countDiff = (b.ratingsCount || 0) - (a.ratingsCount || 0);
+  if (countDiff !== 0) return countDiff;
+  return String(a.url) < String(b.url) ? -1 : String(a.url) > String(b.url) ? 1 : 0;
+}
 
 /**
  * Create an aggregator instance.
@@ -43,14 +94,25 @@ function createAggregator() {
   function addReview(review) {
     if (!review || !review.url || !review.eventId) return;
 
-    const url = review.url;
+    const url = normalizeUrl(review.url);
+    review = { ...review, url };
     let reviews = reviewsByUrl.get(url) || [];
 
     // Check if this exact event already exists
     if (reviews.some((r) => r.eventId === review.eventId)) return;
 
-    // Remove older reviews from the same author (keep only latest)
-    reviews = reviews.filter((r) => r.pubkey !== review.pubkey);
+    // Keep only the latest review per author. Events arrive in no guaranteed order
+    // (relays send newest first, several relays interleave, the local cache is loaded
+    // first), so compare timestamps instead of letting the last one processed win.
+    const existing = reviews.find((r) => r.pubkey === review.pubkey);
+    if (existing) {
+      const newer =
+        (review.created_at || 0) > (existing.created_at || 0) ||
+        ((review.created_at || 0) === (existing.created_at || 0) &&
+          String(review.eventId) > String(existing.eventId));
+      if (!newer) return;
+      reviews = reviews.filter((r) => r.pubkey !== review.pubkey);
+    }
     reviews.push(review);
 
     // Sort by created_at ascending
@@ -79,11 +141,12 @@ function createAggregator() {
   function addMintInfo(info) {
     if (!info || !info.url) return;
 
-    const existing = mintInfoByUrl.get(info.url);
+    const url = normalizeUrl(info.url);
+    const existing = mintInfoByUrl.get(url);
 
     // Keep the most recent event per URL
     if (!existing || (info.created_at || 0) > (existing.created_at || 0)) {
-      mintInfoByUrl.set(info.url, info);
+      mintInfoByUrl.set(url, { ...info, url });
     }
   }
 
@@ -107,7 +170,18 @@ function createAggregator() {
    */
   function setHttpInfo(url, httpResult) {
     if (!url || !httpResult) return;
-    httpInfoByUrl.set(url, httpResult);
+    const key = normalizeUrl(url);
+    httpInfoByUrl.set(key, { ...httpResult, url: key });
+  }
+
+  /**
+   * Get the stored HTTP /v1/info result for a mint.
+   *
+   * @param {string} url - Mint URL
+   * @returns {Object|null} { url, info, error, fetchedAt } or null
+   */
+  function getHttpInfo(url) {
+    return httpInfoByUrl.get(normalizeUrl(url)) || null;
   }
 
   /**
@@ -144,66 +218,18 @@ function createAggregator() {
    * @returns {MintReview[]} Array of reviews
    */
   function getReviewsForUrl(url) {
-    return reviewsByUrl.get(url) || [];
+    return reviewsByUrl.get(normalizeUrl(url)) || [];
   }
 
   /**
-   * Build sorted recommendations from all collected data.
-   * Sorted by review count (descending), then average rating (descending).
+   * Build the recommendation object for one (normalized) URL.
    *
-   * @returns {MintRecommendation[]} Sorted array of recommendations
+   * @param {string} url
+   * @returns {MintRecommendation}
    */
-  function getRecommendations() {
-    const urls = getAllUrls();
-    const recommendations = [];
-
-    for (const url of urls) {
-      const reviews = reviewsByUrl.get(url) || [];
-      const http = httpInfoByUrl.get(url);
-
-      // Calculate average rating
-      const ratings = reviews
-        .map((r) => r.rating)
-        .filter((n) => typeof n === "number" && n >= 1 && n <= 5);
-
-      const averageRating =
-        ratings.length > 0
-          ? ratings.reduce((a, b) => a + b, 0) / ratings.length
-          : null;
-
-      recommendations.push({
-        url,
-        reviewsCount: reviews.length,
-        averageRating,
-        info: http?.info || undefined,
-        error: http?.error || false,
-        lastHttpInfoFetchAt: http?.fetchedAt || undefined,
-      });
-    }
-
-    // Sort: reviewsCount descending, then averageRating descending
-    recommendations.sort((a, b) => {
-      const countDiff = b.reviewsCount - a.reviewsCount;
-      if (countDiff !== 0) return countDiff;
-      return (b.averageRating || 0) - (a.averageRating || 0);
-    });
-
-    return recommendations;
-  }
-
-  /**
-   * Get a single recommendation by URL.
-   *
-   * @param {string} url - Mint URL
-   * @returns {MintRecommendation|null} Recommendation or null
-   */
-  function getRecommendation(url) {
+  function buildRecommendation(url) {
     const reviews = reviewsByUrl.get(url) || [];
     const http = httpInfoByUrl.get(url);
-
-    if (reviews.length === 0 && !mintInfoByUrl.has(url) && !http) {
-      return null;
-    }
 
     const ratings = reviews
       .map((r) => r.rating)
@@ -217,11 +243,38 @@ function createAggregator() {
     return {
       url,
       reviewsCount: reviews.length,
+      ratingsCount: ratings.length,
       averageRating,
+      score: rankingScore(ratings),
       info: http?.info || undefined,
       error: http?.error || false,
       lastHttpInfoFetchAt: http?.fetchedAt || undefined,
     };
+  }
+
+  /**
+   * Build sorted recommendations from all collected data.
+   * Sorted by compareRecommendations: reachable first, then score, then
+   * number of ratings.
+   *
+   * @returns {MintRecommendation[]} Sorted array of recommendations
+   */
+  function getRecommendations() {
+    return getAllUrls().map(buildRecommendation).sort(compareRecommendations);
+  }
+
+  /**
+   * Get a single recommendation by URL.
+   *
+   * @param {string} url - Mint URL
+   * @returns {MintRecommendation|null} Recommendation or null
+   */
+  function getRecommendation(url) {
+    const key = normalizeUrl(url);
+    if (!reviewsByUrl.has(key) && !mintInfoByUrl.has(key) && !httpInfoByUrl.has(key)) {
+      return null;
+    }
+    return buildRecommendation(key);
   }
 
   /**
@@ -313,6 +366,7 @@ function createAggregator() {
     addMintInfos,
     setHttpInfo,
     setHttpInfoBatch,
+    getHttpInfo,
     getAllUrls,
     getReviewsForUrl,
     getRecommendations,
@@ -324,4 +378,11 @@ function createAggregator() {
   };
 }
 
-module.exports = { createAggregator };
+module.exports = {
+  createAggregator,
+  compareRecommendations,
+  normalizeUrl,
+  rankingScore,
+  PRIOR_RATING,
+  PRIOR_WEIGHT,
+};

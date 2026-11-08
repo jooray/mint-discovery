@@ -9,7 +9,7 @@
  *
  * const discovery = MintDiscovery.create();
  * const mints = await discovery.discover();
- * console.log(mints); // Sorted by review count, then rating
+ * console.log(mints); // Reachable first, then by rating score (see aggregator.js)
  */
 
 const { createNostrClient, DEFAULT_RELAYS } = require("./nostr-client");
@@ -125,8 +125,7 @@ function create(options = {}) {
         // Filter out URLs with fresh cache
         const staleUrls = [];
         for (const url of urls) {
-          const existing = aggregator.getRecommendation(url);
-          if (!existing || !isCacheFresh(existing, config.cacheMaxAge)) {
+          if (!isCacheFresh(aggregator.getHttpInfo(url), config.cacheMaxAge)) {
             staleUrls.push(url);
           }
         }
@@ -208,8 +207,7 @@ function create(options = {}) {
           const staleUrls = [];
 
           for (const url of urls) {
-            const existing = aggregator.getRecommendation(url);
-            if (!existing || !isCacheFresh(existing, config.cacheMaxAge)) {
+            if (!isCacheFresh(aggregator.getHttpInfo(url), config.cacheMaxAge)) {
               staleUrls.push(url);
             }
           }
@@ -344,8 +342,7 @@ function create(options = {}) {
 
         // Fetch HTTP info for new mint
         if (mintInfo.url) {
-          const existing = aggregator.getRecommendation(mintInfo.url);
-          if (!existing || !isCacheFresh(existing, config.cacheMaxAge)) {
+          if (!isCacheFresh(aggregator.getHttpInfo(mintInfo.url), config.cacheMaxAge)) {
             const { fetchMintInfo } = require("./mint-info-fetcher");
             const result = await fetchMintInfo(mintInfo.url, config.httpTimeout);
             aggregator.setHttpInfo(mintInfo.url, result);
@@ -531,6 +528,9 @@ function create(options = {}) {
 const MintDiscovery = {
   create,
   DEFAULT_RELAYS,
+  // Same order getRecommendations() uses, for callers that re-sort a list
+  // they build from streaming onMint updates.
+  compareRecommendations: require("./aggregator").compareRecommendations,
 };
 
 module.exports = {
@@ -540,6 +540,8 @@ module.exports = {
   // Re-export components for direct use
   createNostrClient: require("./nostr-client").createNostrClient,
   createAggregator: require("./aggregator").createAggregator,
+  compareRecommendations: require("./aggregator").compareRecommendations,
+  normalizeUrl: require("./aggregator").normalizeUrl,
   createStorage: require("./storage").createStorage,
   parseRatingAndComment: require("./review-parser").parseRatingAndComment,
   fetchMintInfo: require("./mint-info-fetcher").fetchMintInfo,

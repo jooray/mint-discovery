@@ -24,7 +24,7 @@ I write about building things on [my blog](https://juraj.bednar.io/en/blog-en/).
 - Parses review ratings in `[X/5] comment` format
 - Fetches HTTP info from each mint's `/v1/info` endpoint
 - Aggregates reviews and calculates average ratings
-- Sorts mints by review count (descending), then rating (descending)
+- Sorts mints: reachable first, then by a rating score that weighs the average by the number of ratings (see `compareRecommendations`)
 - Optional IndexedDB caching with 1-hour refresh interval
 - Works in both browser and Node.js environments
 
@@ -223,8 +223,10 @@ discovery.close();
 ```javascript
 {
   url: string,                    // Mint URL
-  reviewsCount: number,           // Number of reviews
+  reviewsCount: number,           // Number of reviews (latest per author)
+  ratingsCount: number,           // Reviews that carry a [X/5] rating
   averageRating: number|null,     // Average rating (1-5) or null
+  score: number,                  // Ranking score (average pulled towards 3 by 2 imaginary reviews)
   info: object|undefined,         // HTTP /v1/info response
   error: boolean,                 // Whether last HTTP fetch failed
   lastHttpInfoFetchAt: number     // Unix timestamp of last fetch

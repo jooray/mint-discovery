@@ -6,6 +6,31 @@
 const { SimplePool } = require("nostr-tools/pool");
 const { parseRatingAndComment } = require("./review-parser");
 
+/**
+ * Is this a "u" tag naming a Cashu mint? NIP-87 leaves the third element
+ * undefined; in practice it is absent (most events) or a network label such as
+ * "cashu" or "fedimint". Accept absent/"cashu", reject any other label.
+ *
+ * @param {Array} t - Tag
+ * @returns {boolean}
+ */
+function isCashuUrlTag(t) {
+  if (!Array.isArray(t) || t[0] !== "u" || typeof t[1] !== "string") return false;
+  if (t.length < 3 || t[2] === undefined || t[2] === null || t[2] === "") return true;
+  return String(t[2]).toLowerCase() === "cashu";
+}
+
+/**
+ * Relay "#u" filters match exactly, so ask for both spellings of a URL.
+ *
+ * @param {string} url
+ * @returns {string[]}
+ */
+function urlVariants(url) {
+  const base = url.trim().replace(/\/+$/, "");
+  return [base, base + "/"];
+}
+
 // Nostr event kinds for Cashu
 const MINT_INFO_KIND = 38172;
 const REVIEW_KIND = 38000;
@@ -79,7 +104,7 @@ function createNostrClient(options = {}) {
     const filter = {
       kinds: [REVIEW_KIND],
       "#k": ["38172"],
-      "#u": [url],
+      "#u": urlVariants(url),
       limit,
     };
 
@@ -101,7 +126,7 @@ function createNostrClient(options = {}) {
 
     const filter = {
       kinds: [MINT_INFO_KIND],
-      "#u": [url],
+      "#u": urlVariants(url),
       limit,
     };
 
@@ -189,9 +214,7 @@ function parseMintInfoEvent(event) {
   if (!event || event.kind !== MINT_INFO_KIND) return null;
 
   // Find the 'u' tag with cashu URL
-  const uTag = event.tags.find(
-    (t) => t[0] === "u" && (t[2] === "cashu" || t.length >= 2)
-  );
+  const uTag = (event.tags || []).find(isCashuUrlTag);
 
   if (!uTag || typeof uTag[1] !== "string" || !uTag[1].startsWith("http")) {
     return null;
@@ -226,12 +249,10 @@ function parseMintInfoEvent(event) {
 function parseReviewEvent(event) {
   if (!event || event.kind !== REVIEW_KIND) return [];
 
-  const kTag = event.tags.find((t) => t[0] === "k");
+  const kTag = (event.tags || []).find((t) => t[0] === "k");
   if (!kTag || kTag[1] !== "38172") return [];
 
-  const uTags = event.tags.filter(
-    (t) => t[0] === "u" && (t[2] === "cashu" || t.length >= 2)
-  );
+  const uTags = (event.tags || []).filter(isCashuUrlTag);
   if (!uTags.length) return [];
 
   const { rating, comment } = parseRatingAndComment(event.content || "");
@@ -259,6 +280,7 @@ module.exports = {
   createNostrClient,
   parseMintInfoEvent,
   parseReviewEvent,
+  isCashuUrlTag,
   DEFAULT_RELAYS,
   MINT_INFO_KIND,
   REVIEW_KIND,
