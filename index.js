@@ -18,6 +18,7 @@ const {
   createAggregator,
   normalizeUrl,
   HTTP_INFO_MAX_AGE_SECONDS,
+  MAX_DISCOVERY_URLS,
 } = require("./aggregator");
 const { createStorage } = require("./storage");
 
@@ -235,6 +236,21 @@ function create(options = {}) {
       let httpFetchStarted = false;
       const seenUrls = new Set();
 
+      // URLs already handed to onMint. Once MAX_DISCOVERY_URLS of them have been,
+      // a new URL is not emitted (a flood of reviews for made-up URLs would grow the
+      // caller's list without bound); known ones keep getting updates, and
+      // onComplete still delivers the capped, ranked list.
+      const emittedUrls = new Set();
+      const emitMint = (url) => {
+        if (!callbacks.onMint) return;
+        const key = normalizeUrl(url);
+        if (!emittedUrls.has(key) && emittedUrls.size >= MAX_DISCOVERY_URLS) return;
+        const rec = aggregator.getRecommendation(url);
+        if (!rec) return;
+        emittedUrls.add(key);
+        callbacks.onMint(rec);
+      };
+
       // A relay that never sends EOSE must not keep discovery running: after
       // the Nostr timeout, go on with whatever has arrived.
       eoseFallback = setTimeout(() => {
@@ -288,10 +304,7 @@ function create(options = {}) {
               }
 
               // Emit updated recommendation
-              if (callbacks.onMint) {
-                const rec = aggregator.getRecommendation(result.url);
-                if (rec) callbacks.onMint(rec);
-              }
+              emitMint(result.url);
 
               if (callbacks.onProgress) {
                 callbacks.onProgress({
@@ -337,10 +350,7 @@ function create(options = {}) {
           seenUrls.add(normalizeUrl(mintInfo.url));
 
           // Emit recommendation for this mint
-          if (callbacks.onMint) {
-            const rec = aggregator.getRecommendation(mintInfo.url);
-            if (rec) callbacks.onMint(rec);
-          }
+          emitMint(mintInfo.url);
         },
         onEose: () => {
           mintInfoEose = true;
@@ -365,10 +375,7 @@ function create(options = {}) {
           }
 
           // Emit recommendation for this mint
-          if (callbacks.onMint) {
-            const rec = aggregator.getRecommendation(review.url);
-            if (rec) callbacks.onMint(rec);
-          }
+          emitMint(review.url);
         },
         onEose: () => {
           reviewsEose = true;

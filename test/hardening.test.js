@@ -241,3 +241,41 @@ test("cached httpInfo is evicted when stale or no longer on Nostr", async () => 
     discovery.close();
   }
 });
+
+test("discoverStreaming emits at most MAX_DISCOVERY_URLS distinct mints before onComplete", async () => {
+  const restore = mockFetch(async () => {
+    throw new Error("offline");
+  });
+  const discovery = create({ useStorage: false, httpDelayMs: 0, httpTimeout: 50, nostrTimeout: 2000 });
+  const total = MAX_DISCOVERY_URLS + 25;
+  const url = (i) => `https://m${i}.example`;
+  discovery.nostrClient.subscribeMintInfo = (cb) => {
+    setImmediate(() => {
+      for (let i = 0; i < total; i++) cb.onEvent({ url: url(i), created_at: 1 });
+      cb.onEose();
+    });
+    return { close() {} };
+  };
+  discovery.nostrClient.subscribeReviews = (cb) => {
+    setImmediate(() => {
+      // A review of an already listed mint still updates it.
+      cb.onEvent({ url: url(0) + "/", eventId: "e1", pubkey: "p1", rating: 5, created_at: 2 });
+      // A review of a mint past the cap does not add it.
+      cb.onEvent({ url: url(total - 1), eventId: "e2", pubkey: "p1", rating: 5, created_at: 2 });
+      cb.onEose();
+    });
+    return { close() {} };
+  };
+  const emitted = [];
+  try {
+    const final = await discovery.discoverStreaming({ onMint: (rec) => emitted.push(rec.url) });
+    const distinct = new Set(emitted);
+    assert.strictEqual(distinct.size, MAX_DISCOVERY_URLS);
+    assert.ok(!distinct.has(url(total - 1)), "a URL beyond the cap is not emitted");
+    assert.ok(emitted.filter((u) => u === url(0)).length >= 2, "an emitted mint keeps getting updates");
+    assert.ok(final.length <= MAX_DISCOVERY_URLS);
+  } finally {
+    restore();
+    discovery.close();
+  }
+});
