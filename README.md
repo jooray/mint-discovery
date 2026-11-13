@@ -100,8 +100,11 @@ Create a new discovery instance.
 - `httpTimeout` (number): HTTP request timeout in ms (default: 10000)
 - `httpConcurrency` (number): Max concurrent HTTP requests (default: 20)
 - `httpDelayMs` (number): Delay between HTTP requests (default: 100)
+- `httpBatchTimeout` (number): Deadline for all HTTP checks of one discovery run in ms (default: 60000)
 - `cacheMaxAge` (number): Cache max age in seconds (default: 3600)
 - `useStorage` (boolean): Enable IndexedDB storage (default: true in browser)
+
+Only public `https://` mint URLs are listed (no IP addresses, `localhost` or `.local` names). Each Nostr event contributes at most 5 URLs, and one run lists and checks at most 300, preferring mints with an announcement or reviews from several people.
 
 ### Instance Methods
 

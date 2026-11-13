@@ -33,6 +33,13 @@
 const PRIOR_RATING = 3;
 const PRIOR_WEIGHT = 2;
 
+// Most mint URLs one discovery run lists and fetches. Anyone can publish reviews
+// naming made-up URLs; past this many, the best-supported ones win (see getAllUrls).
+const MAX_DISCOVERY_URLS = 300;
+
+// Cached /v1/info results older than this are dropped rather than shown.
+const HTTP_INFO_MAX_AGE_SECONDS = 7 * 24 * 3600;
+
 /**
  * Normalize a mint URL so "https://m.example" and "https://m.example/" are one mint.
  *
@@ -74,6 +81,8 @@ function compareRecommendations(a, b) {
   return String(a.url) < String(b.url) ? -1 : String(a.url) > String(b.url) ? 1 : 0;
 }
 
+const { isAcceptableMintUrl } = require("./url-policy");
+
 /**
  * Create an aggregator instance.
  *
@@ -93,6 +102,7 @@ function createAggregator() {
    */
   function addReview(review) {
     if (!review || !review.url || !review.eventId) return;
+    if (!isAcceptableMintUrl(review.url)) return;
 
     const url = normalizeUrl(review.url);
     review = { ...review, url };
@@ -140,6 +150,7 @@ function createAggregator() {
    */
   function addMintInfo(info) {
     if (!info || !info.url) return;
+    if (!isAcceptableMintUrl(info.url)) return;
 
     const url = normalizeUrl(info.url);
     const existing = mintInfoByUrl.get(url);
@@ -170,6 +181,7 @@ function createAggregator() {
    */
   function setHttpInfo(url, httpResult) {
     if (!url || !httpResult) return;
+    if (!isAcceptableMintUrl(url)) return;
     const key = normalizeUrl(url);
     httpInfoByUrl.set(key, { ...httpResult, url: key });
   }
@@ -199,16 +211,57 @@ function createAggregator() {
   }
 
   /**
-   * Get all known mint URLs.
+   * Drop cached HTTP results that are too old or (when keepUrls is given) for
+   * mints no longer seen on Nostr.
    *
+   * @param {Object} [opts]
+   * @param {Iterable<string>} [opts.keepUrls] - URLs seen in the current Nostr set
+   * @param {number} [opts.maxAgeSeconds] - Maximum age of a cached result
+   * @returns {string[]} Normalized URLs that were removed
+   */
+  function pruneHttpInfo(opts = {}) {
+    const maxAge = opts.maxAgeSeconds ?? HTTP_INFO_MAX_AGE_SECONDS;
+    const keep = opts.keepUrls ? new Set(Array.from(opts.keepUrls, normalizeUrl)) : null;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const removed = [];
+    for (const [url, http] of httpInfoByUrl) {
+      const tooOld = !http.fetchedAt || nowSec - http.fetchedAt > maxAge;
+      if (tooOld || (keep && !keep.has(url))) {
+        httpInfoByUrl.delete(url);
+        removed.push(url);
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Get known mint URLs, best-supported first, at most `limit` of them.
+   *
+   * A URL is well supported when it has a mint announcement (kind 38172) or
+   * reviews from at least two authors; then come URLs with more reviewers.
+   * A flood of single-author reviews for made-up URLs therefore cannot push
+   * real mints out of the list.
+   *
+   * @param {number} [limit=MAX_DISCOVERY_URLS]
    * @returns {string[]} Array of unique URLs
    */
-  function getAllUrls() {
+  function getAllUrls(limit = MAX_DISCOVERY_URLS) {
     const urls = new Set();
     for (const url of reviewsByUrl.keys()) urls.add(url);
     for (const url of mintInfoByUrl.keys()) urls.add(url);
     for (const url of httpInfoByUrl.keys()) urls.add(url);
-    return Array.from(urls);
+    const support = (url) => {
+      const reviewers = (reviewsByUrl.get(url) || []).length;
+      const strong = mintInfoByUrl.has(url) || reviewers >= 2;
+      return { strong, reviewers };
+    };
+    const ranked = Array.from(urls, (url) => ({ url, ...support(url) }));
+    ranked.sort((a, b) => {
+      if (a.strong !== b.strong) return a.strong ? -1 : 1;
+      if (a.reviewers !== b.reviewers) return b.reviewers - a.reviewers;
+      return a.url < b.url ? -1 : a.url > b.url ? 1 : 0;
+    });
+    return ranked.slice(0, Math.max(0, limit)).map((r) => r.url);
   }
 
   /**
@@ -367,6 +420,7 @@ function createAggregator() {
     setHttpInfo,
     setHttpInfoBatch,
     getHttpInfo,
+    pruneHttpInfo,
     getAllUrls,
     getReviewsForUrl,
     getRecommendations,
@@ -383,6 +437,8 @@ module.exports = {
   compareRecommendations,
   normalizeUrl,
   rankingScore,
+  MAX_DISCOVERY_URLS,
+  HTTP_INFO_MAX_AGE_SECONDS,
   PRIOR_RATING,
   PRIOR_WEIGHT,
 };

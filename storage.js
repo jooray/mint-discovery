@@ -202,6 +202,37 @@ function createStorage() {
   }
 
   /**
+   * Delete cached HTTP info records for which keep(record) returns false.
+   *
+   * @param {Function} keep - Predicate on a stored record ({url, fetchedAt, ...})
+   * @returns {Promise<number>} Number of records deleted
+   */
+  async function pruneHttpInfo(keep) {
+    const database = await openDb();
+    return new Promise((resolve, reject) => {
+      const tx = database.transaction("httpInfo", "readwrite");
+      const store = tx.objectStore("httpInfo");
+      let deleted = 0;
+      tx.onerror = () => reject(tx.error);
+      tx.oncomplete = () => resolve(deleted);
+      const request = store.openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        let ok = false;
+        try {
+          ok = keep(cursor.value);
+        } catch {}
+        if (!ok) {
+          cursor.delete();
+          deleted++;
+        }
+        cursor.continue();
+      };
+    });
+  }
+
+  /**
    * Clear all stored data.
    *
    * @returns {Promise<void>}
@@ -257,6 +288,7 @@ function createStorage() {
     saveHttpInfo,
     getHttpInfo,
     getAllHttpInfo,
+    pruneHttpInfo,
     clearAll,
     isHttpInfoFresh,
     close,

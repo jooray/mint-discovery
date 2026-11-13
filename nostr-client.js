@@ -5,6 +5,27 @@
 
 const { SimplePool } = require("nostr-tools/pool");
 const { parseRatingAndComment } = require("./review-parser");
+const { isAcceptableMintUrl } = require("./url-policy");
+
+// A review names one mint, occasionally a few. Only the first few "u" tags of an
+// event count, so one event cannot add thousands of URLs for the browser to fetch.
+const MAX_U_TAGS_PER_EVENT = 5;
+
+/**
+ * Mint URLs an event names: the first MAX_U_TAGS_PER_EVENT Cashu "u" tags,
+ * keeping only public https URLs.
+ *
+ * @param {Object} event
+ * @returns {string[]}
+ */
+function eventMintUrls(event) {
+  const urls = (event.tags || [])
+    .filter(isCashuUrlTag)
+    .slice(0, MAX_U_TAGS_PER_EVENT)
+    .map((t) => t[1])
+    .filter(isAcceptableMintUrl);
+  return [...new Set(urls)];
+}
 
 /**
  * Is this a "u" tag naming a Cashu mint? NIP-87 leaves the third element
@@ -97,7 +118,7 @@ function createNostrClient(options = {}) {
    * @returns {Promise<Object[]>} Array of parsed review objects
    */
   async function fetchReviewsForUrl(url, limit = 5000) {
-    if (!url || typeof url !== "string" || !url.startsWith("http")) {
+    if (!isAcceptableMintUrl(url)) {
       return [];
     }
 
@@ -120,7 +141,7 @@ function createNostrClient(options = {}) {
    * @returns {Promise<Object[]>} Array of parsed mint info objects
    */
   async function fetchMintInfoForUrl(url, limit = 1000) {
-    if (!url || typeof url !== "string" || !url.startsWith("http")) {
+    if (!isAcceptableMintUrl(url)) {
       return [];
     }
 
@@ -213,12 +234,9 @@ function createNostrClient(options = {}) {
 function parseMintInfoEvent(event) {
   if (!event || event.kind !== MINT_INFO_KIND) return null;
 
-  // Find the 'u' tag with cashu URL
-  const uTag = (event.tags || []).find(isCashuUrlTag);
-
-  if (!uTag || typeof uTag[1] !== "string" || !uTag[1].startsWith("http")) {
-    return null;
-  }
+  // The first acceptable Cashu URL among the event's first few 'u' tags
+  const url = eventMintUrls(event)[0];
+  if (!url) return null;
 
   let content;
   try {
@@ -230,7 +248,7 @@ function parseMintInfoEvent(event) {
   const dTag = event.tags.find((t) => t[0] === "d");
 
   return {
-    url: uTag[1],
+    url,
     pubkey: event.pubkey,
     d: dTag ? dTag[1] : "",
     content,
@@ -252,25 +270,22 @@ function parseReviewEvent(event) {
   const kTag = (event.tags || []).find((t) => t[0] === "k");
   if (!kTag || kTag[1] !== "38172") return [];
 
-  const uTags = (event.tags || []).filter(isCashuUrlTag);
-  if (!uTags.length) return [];
+  const urls = eventMintUrls(event);
+  if (!urls.length) return [];
 
   const { rating, comment } = parseRatingAndComment(event.content || "");
 
   const reviews = [];
-  for (const uTag of uTags) {
-    const url = uTag[1];
-    if (typeof url === "string" && url.startsWith("http")) {
-      reviews.push({
-        eventId: event.id,
-        pubkey: event.pubkey,
-        created_at: event.created_at || 0,
-        rating,
-        comment,
-        url,
-        raw: event,
-      });
-    }
+  for (const url of urls) {
+    reviews.push({
+      eventId: event.id,
+      pubkey: event.pubkey,
+      created_at: event.created_at || 0,
+      rating,
+      comment,
+      url,
+      raw: event,
+    });
   }
 
   return reviews;
@@ -281,6 +296,7 @@ module.exports = {
   parseMintInfoEvent,
   parseReviewEvent,
   isCashuUrlTag,
+  MAX_U_TAGS_PER_EVENT,
   DEFAULT_RELAYS,
   MINT_INFO_KIND,
   REVIEW_KIND,

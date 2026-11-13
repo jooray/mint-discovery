@@ -14,7 +14,11 @@
 
 const { createNostrClient, DEFAULT_RELAYS } = require("./nostr-client");
 const { fetchMintInfoBatch, isCacheFresh } = require("./mint-info-fetcher");
-const { createAggregator } = require("./aggregator");
+const {
+  createAggregator,
+  normalizeUrl,
+  HTTP_INFO_MAX_AGE_SECONDS,
+} = require("./aggregator");
 const { createStorage } = require("./storage");
 
 /**
@@ -26,6 +30,7 @@ const { createStorage } = require("./storage");
  * @param {number} [options.httpTimeout] - HTTP request timeout in ms (default: 10000)
  * @param {number} [options.httpConcurrency] - Max concurrent HTTP requests (default: 20)
  * @param {number} [options.httpDelayMs] - Delay between HTTP requests (default: 100)
+ * @param {number} [options.httpBatchTimeout] - Deadline for all HTTP checks of one discovery run in ms (default: 60000)
  * @param {number} [options.cacheMaxAge] - Cache max age in seconds (default: 3600)
  * @param {boolean} [options.useStorage] - Enable IndexedDB storage (default: true in browser)
  * @returns {Object} MintDiscovery instance
@@ -37,6 +42,7 @@ function create(options = {}) {
     httpTimeout: options.httpTimeout || 10000,
     httpConcurrency: options.httpConcurrency || 20,
     httpDelayMs: options.httpDelayMs || 100,
+    httpBatchTimeout: options.httpBatchTimeout || 60000,
     cacheMaxAge: options.cacheMaxAge || 3600,
     useStorage: options.useStorage !== false,
   };
@@ -73,9 +79,36 @@ function create(options = {}) {
       for (const info of httpInfos) {
         aggregator.setHttpInfo(info.url, info);
       }
+      // Week-old results are dropped, not shown.
+      aggregator.pruneHttpInfo();
     } catch (err) {
       // Storage errors are non-fatal
     }
+  }
+
+  /**
+   * Evict cached HTTP results for mints not in the current Nostr set (when the
+   * relays returned anything at all) or older than a week, in memory and in
+   * storage. Without this, URLs announced once would be listed and refetched
+   * forever.
+   *
+   * @param {Set<string>} seenUrls - Normalized URLs from this run's Nostr events
+   * @returns {Promise<void>}
+   */
+  async function evictStaleHttpInfo(seenUrls) {
+    const keepUrls = seenUrls.size > 0 ? seenUrls : null;
+    aggregator.pruneHttpInfo({ keepUrls: keepUrls || undefined });
+    if (!storage) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    try {
+      await storage.pruneHttpInfo(
+        (rec) =>
+          !!rec &&
+          !!rec.fetchedAt &&
+          nowSec - rec.fetchedAt <= HTTP_INFO_MAX_AGE_SECONDS &&
+          (!keepUrls || keepUrls.has(normalizeUrl(rec.url)))
+      );
+    } catch {}
   }
 
   /**
@@ -116,6 +149,11 @@ function create(options = {}) {
         } catch {}
       }
 
+      const seenUrls = new Set();
+      for (const item of mintInfos) seenUrls.add(normalizeUrl(item.url));
+      for (const item of reviews) seenUrls.add(normalizeUrl(item.url));
+      await evictStaleHttpInfo(seenUrls);
+
       // Fetch HTTP info for all discovered mints
       if (!opts.skipHttpFetch) {
         if (opts.onProgress) opts.onProgress({ phase: "http", step: "fetching" });
@@ -135,6 +173,7 @@ function create(options = {}) {
             concurrency: config.httpConcurrency,
             delayMs: config.httpDelayMs,
             timeout: config.httpTimeout,
+            batchTimeout: config.httpBatchTimeout,
             onResult: async (result) => {
               aggregator.setHttpInfo(result.url, result);
 
@@ -184,6 +223,7 @@ function create(options = {}) {
     }
 
     isDiscovering = true;
+    let eoseFallback;
 
     try {
       // Load from storage first
@@ -193,71 +233,96 @@ function create(options = {}) {
       let mintInfoEose = false;
       let reviewsEose = false;
       let httpFetchStarted = false;
+      const seenUrls = new Set();
+
+      // A relay that never sends EOSE must not keep discovery running: after
+      // the Nostr timeout, go on with whatever has arrived.
+      eoseFallback = setTimeout(() => {
+        mintInfoEose = true;
+        reviewsEose = true;
+        checkEoseAndFetchHttp();
+      }, config.nostrTimeout);
 
       const checkEoseAndFetchHttp = async () => {
         if (mintInfoEose && reviewsEose && !httpFetchStarted) {
           httpFetchStarted = true;
+          clearTimeout(eoseFallback);
+          try {
+            await runHttpPhase();
+          } catch {}
+          finish();
+        }
+      };
 
-          if (callbacks.onProgress) {
-            callbacks.onProgress({ phase: "http", step: "fetching" });
+      const runHttpPhase = async () => {
+        await evictStaleHttpInfo(seenUrls);
+
+        if (callbacks.onProgress) {
+          callbacks.onProgress({ phase: "http", step: "fetching" });
+        }
+
+        // Fetch HTTP info for all discovered mints
+        const urls = aggregator.getAllUrls();
+        const staleUrls = [];
+
+        for (const url of urls) {
+          if (!isCacheFresh(aggregator.getHttpInfo(url), config.cacheMaxAge)) {
+            staleUrls.push(url);
           }
+        }
 
-          // Fetch HTTP info for all discovered mints
-          const urls = aggregator.getAllUrls();
-          const staleUrls = [];
+        if (staleUrls.length > 0) {
+          await fetchMintInfoBatch(staleUrls, {
+            concurrency: config.httpConcurrency,
+            delayMs: config.httpDelayMs,
+            timeout: config.httpTimeout,
+            batchTimeout: config.httpBatchTimeout,
+            onResult: async (result) => {
+              aggregator.setHttpInfo(result.url, result);
 
-          for (const url of urls) {
-            if (!isCacheFresh(aggregator.getHttpInfo(url), config.cacheMaxAge)) {
-              staleUrls.push(url);
-            }
-          }
+              // Save to storage
+              if (storage) {
+                try {
+                  await storage.saveHttpInfo(result.url, result);
+                } catch {}
+              }
 
-          if (staleUrls.length > 0) {
-            await fetchMintInfoBatch(staleUrls, {
-              concurrency: config.httpConcurrency,
-              delayMs: config.httpDelayMs,
-              timeout: config.httpTimeout,
-              onResult: async (result) => {
-                aggregator.setHttpInfo(result.url, result);
+              // Emit updated recommendation
+              if (callbacks.onMint) {
+                const rec = aggregator.getRecommendation(result.url);
+                if (rec) callbacks.onMint(rec);
+              }
 
-                // Save to storage
-                if (storage) {
-                  try {
-                    await storage.saveHttpInfo(result.url, result);
-                  } catch {}
-                }
+              if (callbacks.onProgress) {
+                callbacks.onProgress({
+                  phase: "http",
+                  step: "fetched",
+                  url: result.url,
+                  error: result.error,
+                });
+              }
+            },
+          });
+        }
+      };
 
-                // Emit updated recommendation
-                if (callbacks.onMint) {
-                  const rec = aggregator.getRecommendation(result.url);
-                  if (rec) callbacks.onMint(rec);
-                }
-
-                if (callbacks.onProgress) {
-                  callbacks.onProgress({
-                    phase: "http",
-                    step: "fetched",
-                    url: result.url,
-                    error: result.error,
-                  });
-                }
-              },
-            });
-          }
-
-          // Close subscriptions
+      const finish = () => {
+        // Close subscriptions
+        try {
           mintInfoSub.close();
+        } catch {}
+        try {
           reviewSub.close();
+        } catch {}
 
-          if (callbacks.onProgress) {
-            callbacks.onProgress({ phase: "done" });
-          }
+        isDiscovering = false;
 
-          if (callbacks.onComplete) {
-            callbacks.onComplete(aggregator.getRecommendations());
-          }
+        if (callbacks.onProgress) {
+          callbacks.onProgress({ phase: "done" });
+        }
 
-          isDiscovering = false;
+        if (callbacks.onComplete) {
+          callbacks.onComplete(aggregator.getRecommendations());
         }
       };
 
@@ -269,6 +334,7 @@ function create(options = {}) {
       const mintInfoSub = nostrClient.subscribeMintInfo({
         onEvent: (mintInfo) => {
           aggregator.addMintInfo(mintInfo);
+          seenUrls.add(normalizeUrl(mintInfo.url));
 
           // Emit recommendation for this mint
           if (callbacks.onMint) {
@@ -289,6 +355,7 @@ function create(options = {}) {
       const reviewSub = nostrClient.subscribeReviews({
         onEvent: async (review) => {
           aggregator.addReview(review);
+          seenUrls.add(normalizeUrl(review.url));
 
           // Save to storage
           if (storage) {
@@ -321,6 +388,7 @@ function create(options = {}) {
         };
       });
     } catch (err) {
+      clearTimeout(eoseFallback);
       isDiscovering = false;
       throw err;
     }
@@ -500,6 +568,7 @@ function create(options = {}) {
     if (newOptions.httpTimeout) config.httpTimeout = newOptions.httpTimeout;
     if (newOptions.httpConcurrency) config.httpConcurrency = newOptions.httpConcurrency;
     if (newOptions.httpDelayMs) config.httpDelayMs = newOptions.httpDelayMs;
+    if (newOptions.httpBatchTimeout) config.httpBatchTimeout = newOptions.httpBatchTimeout;
     if (newOptions.cacheMaxAge) config.cacheMaxAge = newOptions.cacheMaxAge;
   }
 
